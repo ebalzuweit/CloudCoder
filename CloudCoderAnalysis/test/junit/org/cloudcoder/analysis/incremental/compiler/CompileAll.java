@@ -23,6 +23,8 @@ import org.cloudcoder.app.shared.model.User;
 import org.cloudcoder.builder2.javacompiler.InMemoryJavaCompiler;
 import org.junit.Test;
 
+import com.mysql.jdbc.exceptions.jdbc4.MySQLSyntaxErrorException;
+
 import static org.junit.Assert.*;
 import difflib.Delta;
 import difflib.DiffUtils;
@@ -48,6 +50,12 @@ public class CompileAll
 			return e2;
 		}
 	}
+	
+	private enum ProgrammingLanguage {
+		Java,
+		C
+	}
+	
     /*
      * 
      * Strategies:
@@ -103,7 +111,7 @@ public class CompileAll
             }
             @Override
             public String getDatabaseName() {
-                return "cloudcoderdb";
+                return "cloudcoder-nz-f13";
             }
             @Override
             public String getHost() {
@@ -240,11 +248,12 @@ public class CompileAll
     public void workLoop()
     throws Exception
     {
-    	// get the student problem pair
     	Connection conn = null;
     	try {
     		Class.forName("com.mysql.jdbc.Driver");
-    		conn = DriverManager.getConnection("jdbc:mysql://localhost:8889/cloudcoderdb?user=root&password=root");
+    		conn = DriverManager.getConnection("jdbc:mysql://localhost:8889/cloudcoder-nz-f13?user=root&password=root");
+    		ProgrammingLanguage language = ProgrammingLanguage.C;
+    		final int course_id = 2;
     		// connections start in auto-commit mode, we turn this off so we can use transactions
     		conn.setAutoCommit(false); // this will turn off auto-commit, and start a new transaction
     		// each call to commit() ends the current transaction and starts a new one
@@ -252,17 +261,18 @@ public class CompileAll
     		// clear and populate the status table
     		// we don't need the clear, just use it for testing
     		clearStatusTable(conn);
-    		populateStatusTable(conn);
+    		populateStatusTable(conn, course_id);
     		
     		boolean done = false;
     		while (!done) {
+    			// get the student problem pair
 		    	Tuple<Integer, Integer> pair = getStudentProblemPair(conn);
 		    	if (pair.getFirst() != -1)
 		    	{
 			    	// want to remove cleanRecords and have the work resume from where it left off
 			    	cleanRecords(conn, pair);
 		    		// work should resume from last_line in e_status table
-			    	boolean result = doWork(conn, pair.getFirst(), pair.getSecond());
+			    	boolean result = doWork(conn, pair.getFirst(), pair.getSecond(), language);
 			    	markPair(conn, pair, result);
 		    	}
 		    	else
@@ -293,7 +303,7 @@ public class CompileAll
     	System.out.println("Status table cleared.");
     }
     
-    public void populateStatusTable(Connection conn)
+    public void populateStatusTable(Connection conn, int course_id)
     throws Exception
     {
     	System.out.println("Populating status table...");
@@ -310,12 +320,28 @@ public class CompileAll
 			int userID = result.getInt("user_id");
 			int problemID = result.getInt("problem_id");
 			
+			// get only the students in the class
 			Statement stmt2 = conn.createStatement();
+			query = "SELECT user_id " +
+					"FROM cc_course_registrations " +
+					"WHERE user_id = " + userID + " " +
+					"AND course_id = " + course_id + " " +
+					"AND registration_type = 0;";
+			
+			ResultSet result2 = stmt2.executeQuery(query);
+			if (result2.next()) {
+				// student problem pair is a student in the class we're looking at
+			} else {
+				// skip this pair
+				continue;
+			}
+			
+			stmt2 = conn.createStatement();
 			query = "SELECT last_line FROM e_status " +
 					"WHERE user_id = " + userID + " " +
 					"AND problem_id = " + problemID + ";";
 			
-			ResultSet result2 = stmt2.executeQuery(query);
+			result2 = stmt2.executeQuery(query);
 			if (result2.next()) {
 				// record already exists
 			} else {
@@ -402,7 +428,7 @@ public class CompileAll
 		System.out.println("Cleaning complete");
     }
     
-    private static boolean doWork(Connection conn, int userID, int problemID)
+    private static boolean doWork(Connection conn, int userID, int problemID, ProgrammingLanguage language)
     throws Exception
     {
     	System.out.println("Committing lines for user: " + userID + " and problem: " + problemID + "...");
@@ -445,7 +471,7 @@ public class CompileAll
     	        return false;
     		}
 
-    		CompilationResult compResult = compile(text);
+    		CompilationResult compResult = compile(text, language);
     		CompilationOutcome outcome = compResult.getOutcome();
     		
     		String compiledString = "0";
@@ -456,7 +482,12 @@ public class CompileAll
     		stmt = conn.createStatement();
     		query = 	"INSERT INTO e_lines (user_id, problem_id, text, compiled)" +
     						"VALUES ('" + userID + "','" + problemID + "','" + text + "','" + compiledString + "');";
-    		stmt.executeUpdate(query, Statement.RETURN_GENERATED_KEYS);
+    		try {
+    			stmt.executeUpdate(query, Statement.RETURN_GENERATED_KEYS);
+    		} catch (MySQLSyntaxErrorException e) {
+    			System.out.println("Error with SQL syntax: " + query + "\n\n");
+    			throw e;
+    		}
     		
     		// get line_id
     		int line_id = -1;
@@ -697,16 +728,26 @@ public class CompileAll
     }
     **/
     
-    private static CompilationResult compile(String text) {
-    	String preappendText = "public class ProblemWrapper {";
-    	String postappendText = "}";
-    	String docString = preappendText + text + postappendText;
-		
-		InMemoryJavaCompiler compiler = new InMemoryJavaCompiler();
-		compiler.addSourceFile("ProblemWrapper", docString);
-		compiler.compile();
-		
-		return compiler.getCompileResult();
+    private static CompilationResult compile(String text, ProgrammingLanguage language) {
+    	switch (language) {
+    	case C:
+    		// TODO: make this actually do compilation
+    		// we don't do this now b/c we're time-limited and not using the line-by-line compilation anyway
+    		// we just want the line-by-line data
+    		CompilationResult result = new CompilationResult(CompilationOutcome.SUCCESS);
+    		return result;
+    	case Java:
+    	default:
+			String preappendText = "public class ProblemWrapper {";
+	    	String postappendText = "}";
+	    	String docString = preappendText + text + postappendText;
+			
+			InMemoryJavaCompiler compiler = new InMemoryJavaCompiler();
+			compiler.addSourceFile("ProblemWrapper", docString);
+			compiler.compile();
+			
+			return compiler.getCompileResult();	
+    	}
     }
     
     private static String sanitizeString(String text) {
